@@ -1,20 +1,15 @@
 #include <windows.h>
 
-LRESULT CALLBACK
-MainWindowCallBack(HWND hwnd,
-		   UINT uMsg,
-		   WPARAM wParam,
-		   LPARAM lParam)
+LRESULT CALLBACK MainWindowCallback(HWND hwnd,
+				    UINT uMsg,
+				    WPARAM wParam,
+				    LPARAM lParam)
 {
   LRESULT Result = 0;
-  
+
+  //#if 0
   switch(uMsg)
     {
-    case WM_CREATE:
-      {
-	OutputDebugStringA("WM_CREATE\n");
-      } break;
-
     case WM_SIZE:
       {
 	OutputDebugStringA("WM_SIZE\n");
@@ -27,6 +22,7 @@ MainWindowCallBack(HWND hwnd,
 
     case WM_CLOSE:
       {
+	PostQuitMessage(0);
 	OutputDebugStringA("WM_CLOSE\n");
       } break;
 
@@ -44,21 +40,29 @@ MainWindowCallBack(HWND hwnd,
 	int Width = Paint.rcPaint.right - Paint.rcPaint.left;
 	int Height = Paint.rcPaint.bottom - Paint.rcPaint.top;
 	static DWORD Operation = WHITENESS;
-	PatBlt(DeviceContext, X, Y, Width, Height, WHITENESS);
+	PatBlt(DeviceContext, X, Y, Width, Height, Operation);
+	if(Operation == WHITENESS)
+	  {
+	    Operation = BLACKNESS;
+	  }
+	else
+	  {
+	    Operation = WHITENESS;
+	  }
 	EndPaint(hwnd, &Paint);
       } break;
-
+      
     default:
       {
-	//	OutputDebugStringA("default\n");
-	Result = 9;
+	//       	OutputDebugStringA("default\n");
+	Result = DefWindowProc(hwnd, uMsg, wParam, lParam);
       } break;
+      
     }
-  
+  //#endif
   return(Result);
-}
-
-
+};
+			    
 int CALLBACK
 WinMain(HINSTANCE hInstance,
 	HINSTANCE hPrevInstance,
@@ -68,34 +72,34 @@ WinMain(HINSTANCE hInstance,
   WNDCLASS WindowClass = {};
 
   WindowClass.style = CS_OWNDC|CS_HREDRAW|CS_VREDRAW;
-  WindowClass.lpfnWndProc = MainWindowCallBack;
+  WindowClass.lpfnWndProc = MainWindowCallback;
   WindowClass.hInstance = hInstance;
-  WindowClass.lpszClassName = "Blahblah";
+  WindowClass.lpszClassName = "HandmadeHeroWindowClass";
 
-  if(RegisterClass(&WindowClass))
+  if (RegisterClass(&WindowClass))
     {
       HWND WindowHandle =
 	CreateWindowEx(
 		       WS_EX_LEFT,
 		       WindowClass.lpszClassName,
-		       "HandMade Hero",
+		       "Handmade Hero",
 		       WS_OVERLAPPEDWINDOW|WS_VISIBLE,
 		       CW_USEDEFAULT,
 		       CW_USEDEFAULT,
 		       CW_USEDEFAULT,
 		       CW_USEDEFAULT,
-		       0,
-		       0,
+		       NULL,
+		       NULL,
 		       hInstance,
-		       0
-		       );
-      if(WindowHandle)
+		       NULL);
+      DWORD CWError = GetLastError();
+      if (WindowHandle)
 	{
 	  for(;;)
 	    {
-	      /*	      MSG Message;
+	      MSG Message;
 	      BOOL MessageResult = GetMessage(&Message, 0, 0, 0);
-	      if(MessageResult > 0)
+	      if (MessageResult > 0)
 		{
 		  TranslateMessage(&Message);
 		  DispatchMessage(&Message);
@@ -103,16 +107,15 @@ WinMain(HINSTANCE hInstance,
 	      else
 		{
 		  break;
-		  }*/
+		}
 	    }
 	}
-      else
-	{
-	}; 
     }
   else
     {
-    };
+    }
+  
+
   
   return(0);
 }
