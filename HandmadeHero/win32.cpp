@@ -1,5 +1,8 @@
+// Windows stuff
 #include <windows.h>
 #include <stdint.h>
+// Input and control stuff
+#include <xinput.h>
 
 #define internal static
 #define local_persist static
@@ -9,6 +12,7 @@ typedef int8_t int8;
 typedef int16_t int16;
 typedef int32_t int32;
 typedef int64_t int64;
+typedef int32_t bool32;
 
 typedef uint8_t uint8;
 typedef uint16_t uint16;
@@ -17,16 +21,13 @@ typedef uint64_t uint64;
 
 struct win32_offscreen_buffer
 {
+  // Pixels are always 32-bits wide, Little Endian 8x xx RR GG BB
   BITMAPINFO Info;
   void *Memory;
   int Width;
   int Height;
   int Pitch;
-  int BytesPerPixel;
 };
-
-global_variable bool GlobalRunning;
-global_variable win32_offscreen_buffer GlobalBackbuffer;
 
 struct win32_window_dimension
 {
@@ -34,7 +35,58 @@ struct win32_window_dimension
   int Height;
 };
 
-win32_window_dimension
+// We only need get_state and set_state.
+// We are going to load the functions ourselves without asking the linker to do it for us.
+// We define pointers to the functions to avoid the linker.
+
+// XInputGetState
+#define X_INPUT_GET_STATE(name) DWORD WINAPI name(DWORD dxUserIndex, XINPUT_STATE *pState)
+typedef X_INPUT_GET_STATE(x_input_get_state);
+X_INPUT_GET_STATE(XInputGetStateStub)
+{
+  return(ERROR_DEVICE_NOT_CONNECTED);
+}
+global_variable x_input_get_state *XInputGetState_ = XInputGetStateStub;
+
+// XInputSetState
+#define X_INPUT_SET_STATE(name) DWORD WINAPI name(DWORD dxUserIndex, XINPUT_VIBRATION *pVibration)
+typedef X_INPUT_SET_STATE(x_input_set_state);
+X_INPUT_SET_STATE(XInputSetStateStub)
+{
+  return(ERROR_DEVICE_NOT_CONNECTED);
+}
+global_variable x_input_set_state *XInputSetState_ = XInputSetStateStub;
+
+#define XInputGetState XInputGetState_
+#define XInputSetState XInputSetState_
+
+// This is global for now.
+global_variable bool GlobalRunning;
+global_variable win32_offscreen_buffer GlobalBackbuffer;
+
+// We load the library ourselves.
+// xinput1_3.dll seems to be available on more computers and have a bigger compatibility.
+internal void
+Win32LoadXInput(void)
+{
+  HMODULE XInputLibrary = LoadLibraryA("xinput1_4.dll");
+  if(!XInputLibrary)
+    {
+      XInputLibrary = LoadLibraryA("xinput1_3.dll");
+    }
+  
+  if(XInputLibrary)
+    {
+      // GetProcAddress returns a void * We need to cast it to the right type.
+      XInputGetState = (x_input_get_state *)GetProcAddress(XInputLibrary, "XInputGetState");
+      if(!XInputGetState) {XInputGetState = XInputGetStateStub;}
+
+      XInputSetState = (x_input_set_state *)GetProcAddress(XInputLibrary, "XInputSetState");
+      if(!XInputSetState) {XInputSetState = XInputSetStateStub;}
+    }
+}
+
+internal win32_window_dimension
 Win32GetWindowDimension(HWND Window)
 {
   win32_window_dimension Result;
@@ -51,15 +103,15 @@ Win32GetWindowDimension(HWND Window)
 }
 
 internal void
-RenderWeirdGradient(win32_offscreen_buffer Buffer, int BlueOffset, int GreenOffset)
+RenderWeirdGradient(win32_offscreen_buffer *Buffer, int BlueOffset, int GreenOffset)
 {
-  uint8 *Row = (uint8 *) Buffer.Memory;
+  uint8 *Row = (uint8 *) Buffer->Memory;
   
-  for (int Y = 0; Y < Buffer.Height; ++Y)
+  for (int Y = 0; Y < Buffer->Height; ++Y)
     {
       uint32 *Pixel = (uint32 *) Row;
       
-      for (int X = 0; X < Buffer.Width; ++X)
+      for (int X = 0; X < Buffer->Width; ++X)
 	{
 	  /*
 	    Pixel in Memory: RR GG BB xx
@@ -70,7 +122,7 @@ RenderWeirdGradient(win32_offscreen_buffer Buffer, int BlueOffset, int GreenOffs
 
 	  *Pixel++ = ((Green << 8) | Blue);
 	}
-      Row += Buffer.Pitch;
+      Row += Buffer->Pitch;
     }
 }
 
@@ -88,7 +140,8 @@ Win32ResizeDIBSection(win32_offscreen_buffer *Buffer, int Width, int Height)
   // We fill the buffer structure with the data needed.
   Buffer->Width = Width;
   Buffer->Height = Height;
-  Buffer->BytesPerPixel = 4;
+  
+  int BytesPerPixel = 4;
 
   // When the biHeight field is negative, this is the clue to
   // Windows to treat this bitmap as top-down, not bottom-up, meaning that
@@ -105,17 +158,15 @@ Win32ResizeDIBSection(win32_offscreen_buffer *Buffer, int Width, int Height)
   // Whenever we need a different size.
   // VirtualAlloc books in memory page sizes.
   // Pitch: The number of bytes needed to go from one row to the next one.
-  int BitmapMemorySize = (Buffer->Width*Buffer->Height)*Buffer->BytesPerPixel;
+  int BitmapMemorySize = (Buffer->Width*Buffer->Height)*BytesPerPixel;
   Buffer->Memory = VirtualAlloc(0, BitmapMemorySize, MEM_COMMIT, PAGE_READWRITE);
 
-  Buffer->Pitch = Width*Buffer->BytesPerPixel;
+  Buffer->Pitch = Width*BytesPerPixel;
 }
 
 internal void
-Win32DisplayBufferInWindow(HDC DeviceContext,
-			   int WindowWidth, int WindowHeight,
-			   win32_offscreen_buffer Buffer,
-			   int X, int Y, int Width, int Height)
+Win32DisplayBufferInWindow(win32_offscreen_buffer *Buffer,
+			   HDC DeviceContext, int WindowWidth, int WindowHeight)
 {
   // This function stretches our backupbuffer up into or down into our display window.
   StretchDIBits(DeviceContext,
@@ -124,17 +175,18 @@ Win32DisplayBufferInWindow(HDC DeviceContext,
 		X, Y, Width, Height, 
 		*/
 		0, 0, WindowWidth, WindowHeight,
-		0, 0, Buffer.Width, Buffer.Height,
-		Buffer.Memory,
-		&Buffer.Info,
+		0, 0, Buffer->Width, Buffer->Height,
+		Buffer->Memory,
+		&Buffer->Info,
 		DIB_RGB_COLORS, SRCCOPY);
 }
 
 
-LRESULT CALLBACK MainWindowCallback(HWND hwnd,
-				    UINT uMsg,
-				    WPARAM wParam,
-				    LPARAM lParam)
+internal LRESULT
+CALLBACK MainWindowCallback(HWND hwnd,
+			    UINT uMsg,
+			    WPARAM wParam,
+			    LPARAM lParam)
 {
   LRESULT Result = 0;
 
@@ -164,19 +216,69 @@ LRESULT CALLBACK MainWindowCallback(HWND hwnd,
 	GlobalRunning = false;
       } break;
 
+      // Keyboard Input
+    case WM_SYSKEYDOWN:
+    case WM_SYSKEYUP:
+    case WM_KEYDOWN:
+    case WM_KEYUP:
+      {
+	uint32 VKCode = wParam;
+	bool WasDown = ((lParam & (1 << 30)) != 0);
+	bool IsDown = ((lParam & (1 << 31)) == 0);
+	if(WasDown != IsDown)
+	  {
+	    if(VKCode == 'W')
+	      {
+	      }
+	    else if(VKCode == 'A')
+	      {
+	      }
+	    else if(VKCode == 'S')
+	      {
+	      }
+	    else if(VKCode == 'D')
+	      {
+	      }
+	    else if(VKCode == 'Q')
+	      {
+	      }
+	    else if(VKCode == 'E')
+	      {
+	      }
+	    else if(VKCode == VK_UP)
+	      {
+	      }
+	    else if(VKCode == VK_LEFT)
+	      {
+	      }
+	    else if(VKCode == VK_DOWN)
+	      {
+	      }
+	    else if(VKCode == VK_RIGHT)
+	      {
+	      }
+	    else if(VKCode == VK_ESCAPE)
+	      {
+	      }
+	    else if(VKCode == VK_SPACE)
+	      {
+	      }
+	  }
+
+	bool32 AltKeyWasDown = (lParam & (1 << 29));
+	if((VKCode == VK_F4) && AltKeyWasDown)
+	  {
+	    GlobalRunning = false;
+	  }
+      } break;
+      
     case WM_PAINT:
       {
 	PAINTSTRUCT Paint;
 	HDC DeviceContext = BeginPaint(hwnd, &Paint);
-	int X = Paint.rcPaint.left;
-	int Y = Paint.rcPaint.top;
-	int Width = Paint.rcPaint.right - Paint.rcPaint.left;
-	int Height = Paint.rcPaint.bottom - Paint.rcPaint.top;
-
 	win32_window_dimension Dimension = Win32GetWindowDimension(hwnd);
-	Win32DisplayBufferInWindow(DeviceContext, Dimension.Width, Dimension.Height,
-				   GlobalBackbuffer, X, Y, Width, Height);
-				   
+	Win32DisplayBufferInWindow(&GlobalBackbuffer, DeviceContext,
+				   Dimension.Width, Dimension.Height);
 	EndPaint(hwnd, &Paint);
       } break;
       
@@ -200,11 +302,14 @@ WinMain(HINSTANCE hInstance,
 	LPSTR lpCmdLine,
 	int nCmdShow)
 {
+  // Initialization of the input procedures.
+  Win32LoadXInput();
+  
   //
   // We initialize the WindowClass to 0.
   // Contains the window class attributes that are registered by RegisterClass function.
   //
-  WNDCLASS WindowClass = {};
+  WNDCLASSA WindowClass = {};
 
   // Redraws the full window (and not only the new part)
   // We initialize the Backbuffer
@@ -269,7 +374,47 @@ WinMain(HINSTANCE hInstance,
 		  DispatchMessageA(&Message);
 		}
 	      
-	      RenderWeirdGradient(GlobalBackbuffer, XOffset, YOffset);
+	      // The input API need to be polled...
+	      for(DWORD ControllerIndex = 8; ControllerIndex < XUSER_MAX_COUNT; ++ControllerIndex)
+		{
+		  XINPUT_STATE ControllerState;
+		  if(XInputGetState(ControllerIndex, &ControllerState) == ERROR_SUCCESS)
+		    {
+		      // This controller is plugged in
+		      XINPUT_GAMEPAD *Pad = &ControllerState.Gamepad;
+
+		      bool Up = (Pad->wButtons & XINPUT_GAMEPAD_DPAD_UP);
+		      bool Down = (Pad->wButtons & XINPUT_GAMEPAD_DPAD_DOWN);
+		      bool Left = (Pad->wButtons & XINPUT_GAMEPAD_DPAD_LEFT);
+		      bool Rigth = (Pad->wButtons & XINPUT_GAMEPAD_DPAD_RIGHT);
+		      bool Start = (Pad->wButtons & XINPUT_GAMEPAD_START);
+		      bool Back = (Pad->wButtons & XINPUT_GAMEPAD_BACK);
+		      bool LeftShoulder = (Pad->wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER);
+		      bool RightShoulder = (Pad->wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER);
+		      bool AButton = (Pad->wButtons & XINPUT_GAMEPAD_A);
+		      bool BButton = (Pad->wButtons & XINPUT_GAMEPAD_B);
+		      bool XButton = (Pad->wButtons & XINPUT_GAMEPAD_X);
+		      bool YButton = (Pad->wButtons & XINPUT_GAMEPAD_Y);
+
+		      int16 StickX = Pad -> sThumbLX;
+		      int16 StickY = Pad -> sThumbLY;
+
+		      XOffset += StickX >> 8;
+		      YOffset += StickY >> 8;
+		    }
+		  else
+		    {
+		      // The controller is not available
+		    }
+		}
+
+	      // We turn on the vibration.
+	      XINPUT_VIBRATION Vibration;
+	      Vibration.wLeftMotorSpeed = 68888;
+	      Vibration.wRightMotorSpeed = 68888;
+	      XInputSetState(0, &Vibration);
+	      
+	      RenderWeirdGradient(&GlobalBackbuffer, XOffset, YOffset);
 
 	      // We get a handle to the window that allows us to issue draw calls.
 	      HDC DeviceContext = GetDC(WindowHandle);
@@ -278,15 +423,13 @@ WinMain(HINSTANCE hInstance,
 	      win32_window_dimension Dimension = Win32GetWindowDimension(WindowHandle);
 
 	      // We display the buffer in the window.
-	      Win32DisplayBufferInWindow(DeviceContext, Dimension.Width, Dimension.Height,
-					 GlobalBackbuffer,
-					 0, 0, Dimension.Width, Dimension.Height);
+	      Win32DisplayBufferInWindow(&GlobalBackbuffer, DeviceContext,
+					 Dimension.Width, Dimension.Height);
 
 	      // We release the handle.
 	      ReleaseDC(WindowHandle, DeviceContext);
 	       
 	      ++XOffset;
-	      YOffset += 1;
 	    }
 	}
     }
