@@ -3,6 +3,8 @@
 #include <stdint.h>
 // Input and control stuff
 #include <xinput.h>
+// Sound stuff
+#include <dsound.h>
 
 #define internal static
 #define local_persist static
@@ -60,9 +62,13 @@ global_variable x_input_set_state *XInputSetState_ = XInputSetStateStub;
 #define XInputGetState XInputGetState_
 #define XInputSetState XInputSetState_
 
+#define DIRECT_SOUND_CREATE(name) HRESULT WINAPI name(LPCGUID pcGuidDevice, LPDIRECTSOUND *ppDS, LPUNKNOWN pUnkOuter)
+typedef DIRECT_SOUND_CREATE(direct_sound_create);
+
 // This is global for now.
 global_variable bool GlobalRunning;
 global_variable win32_offscreen_buffer GlobalBackbuffer;
+global_variable LPDIRECTSOUNDBUFFER GlobalSecondaryBuffer;
 
 // We load the library ourselves.
 // xinput1_3.dll seems to be available on more computers and have a bigger compatibility.
@@ -74,6 +80,9 @@ Win32LoadXInput(void)
     {
       XInputLibrary = LoadLibraryA("xinput1_3.dll");
     }
+  else
+    {
+    }
   
   if(XInputLibrary)
     {
@@ -83,6 +92,81 @@ Win32LoadXInput(void)
 
       XInputSetState = (x_input_set_state *)GetProcAddress(XInputLibrary, "XInputSetState");
       if(!XInputSetState) {XInputSetState = XInputSetStateStub;}
+    }
+  else
+    {
+      
+    }
+}
+
+internal void
+Win32InitDSound(HWND WindowHandle, int32 SamplesPerSecond, int32 BufferSize)
+{
+  // Load the library.
+  HMODULE DSoundLibrary = LoadLibraryA("dsound.dll");
+
+  if(DSoundLibrary)
+    {
+      // Get a directsound object. Cooperative.
+      direct_sound_create *DirectSoundCreate = (direct_sound_create *)
+	GetProcAddress(DSoundLibrary, "DirectSoundCreate");
+      
+      // SUCCEEDED is a macro to check if the object was rightly created.
+      LPDIRECTSOUND DirectSound;
+      if(DirectSoundCreate && SUCCEEDED(DirectSoundCreate(0, &DirectSound, 0)))
+	{
+	  WAVEFORMATEX WaveFormat = {};
+	  WaveFormat.wFormatTag = WAVE_FORMAT_PCM;
+	  WaveFormat.nChannels = 2;
+	  WaveFormat.nSamplesPerSec = SamplesPerSecond;
+	  WaveFormat.wBitsPerSample = 16;
+	  WaveFormat.nBlockAlign = (WaveFormat.nChannels*WaveFormat.wBitsPerSample) / 8;
+	  WaveFormat.nAvgBytesPerSec = WaveFormat.nSamplesPerSec*WaveFormat.nBlockAlign;
+	  WaveFormat.cbSize = 0;
+
+	  // DirectSound is a pointer to the virtual table of the dsound.dll
+	  if(SUCCEEDED(DirectSound->SetCooperativeLevel(WindowHandle, DSSCL_PRIORITY)))
+	    {
+	      DSBUFFERDESC BufferDescription = {};
+	      BufferDescription.dwSize = sizeof(BufferDescription);
+	      BufferDescription.dwFlags = DSBCAPS_PRIMARYBUFFER;
+	      
+	      // "Create" a primary  buffer.
+	      LPDIRECTSOUNDBUFFER PrimaryBuffer;
+	      if(SUCCEEDED(DirectSound->CreateSoundBuffer(&BufferDescription, &PrimaryBuffer, 0)))
+		{
+		  if(SUCCEEDED(PrimaryBuffer->SetFormat(&WaveFormat)))
+		    {
+		      // We have finally set the format.
+		      OutputDebugStringA("Primary buffer format was set.\n");
+		    }
+		  else
+		    {
+		    }
+		}
+	      else
+		{
+		}
+	    }
+	  else
+	    {
+	    }
+	  
+	  DSBUFFERDESC BufferDescription = {};
+	  BufferDescription.dwSize = sizeof(BufferDescription);
+	  BufferDescription.dwFlags = 0;
+	  BufferDescription.dwBufferBytes = BufferSize;
+	  BufferDescription.lpwfxFormat = &WaveFormat;
+	  if(SUCCEEDED(DirectSound->CreateSoundBuffer(&BufferDescription, &GlobalSecondaryBuffer, 0)))
+	    {
+	      // Start it playing.
+	      OutputDebugStringA("Secondary buffer created successfully.\n");
+	    }
+	}
+      else
+	{
+	  
+	}
     }
 }
 
@@ -159,7 +243,7 @@ Win32ResizeDIBSection(win32_offscreen_buffer *Buffer, int Width, int Height)
   // VirtualAlloc books in memory page sizes.
   // Pitch: The number of bytes needed to go from one row to the next one.
   int BitmapMemorySize = (Buffer->Width*Buffer->Height)*BytesPerPixel;
-  Buffer->Memory = VirtualAlloc(0, BitmapMemorySize, MEM_COMMIT, PAGE_READWRITE);
+  Buffer->Memory = VirtualAlloc(0, BitmapMemorySize, MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE);
 
   Buffer->Pitch = Width*BytesPerPixel;
 }
@@ -350,10 +434,25 @@ WinMain(HINSTANCE hInstance,
 	  // get one device context and use it forever because we
 	  // are not sharing it with anyone.
 	  HDC DeviceCOntext = GetDC(WindowHandle);
-	  
+
+	  // Graphic Test.
 	  int XOffset = 0;
 	  int YOffset = 0;
+	  
+	  // Sound Test.
+	  int SamplesPerSecond = 40000;
+	  int ToneHz = 256;
+	  int16 ToneVolume = 40000;
+	  uint32 RunningSampleIndex = 0;
+	  int SquareWaveCounter = 0;
+	  int SquareWavePeriod = SamplesPerSecond/ToneHz;
+	  int HalfSquareWavePeriod = SquareWavePeriod/2;
+	  int BytesPerSample = sizeof(int16)*2;
+	  int SecondaryBufferSize = SamplesPerSecond*BytesPerSample;
 
+	  Win32InitDSound(WindowHandle, SamplesPerSecond, SecondaryBufferSize);
+	  GlobalSecondaryBuffer->Play(0, 0, DSBPLAY_LOOPING);
+	  
 	  GlobalRunning = true;
 	  while(GlobalRunning)
 	    {
@@ -415,6 +514,58 @@ WinMain(HINSTANCE hInstance,
 	      XInputSetState(0, &Vibration);
 	      
 	      RenderWeirdGradient(&GlobalBackbuffer, XOffset, YOffset);
+
+	      // DirectSound Output Test
+	      DWORD PlayCursor;
+	      DWORD WriteCursor;
+	      
+	      if(SUCCEEDED(GlobalSecondaryBuffer->GetCurrentPosition(&PlayCursor, &WriteCursor)))
+		{
+		  DWORD ByteToLock = RunningSampleIndex*BytesPerSample % SecondaryBufferSize;
+		  DWORD BytesToWrite;
+		  
+		  if(ByteToLock > PlayCursor)
+		    {
+		      BytesToWrite = SecondaryBufferSize - ByteToLock;
+		      BytesToWrite += PlayCursor;
+		    }
+		  else
+		    {
+		      BytesToWrite = PlayCursor - ByteToLock;
+		    }
+
+		  // Sound Buffer sample:
+		  // int16 int16 int16 ...
+		  // [LEFT RIGHT] [LEFT RIGHT] ...
+		  VOID *Region1;
+		  DWORD Region1Size;
+		  VOID *Region2;
+		  DWORD Region2Size;
+		  
+		  GlobalSecondaryBuffer->Lock(ByteToLock, BytesToWrite,
+					      &Region1, &Region1Size,
+					      &Region2, &Region2Size,
+					      0);
+		  DWORD Region1SampleCount = Region1Size/BytesPerSample;
+		  int16 *SampleOut = (int16 *)Region1;
+		  for(DWORD SampleIndex = 0; SampleIndex < Region1SampleCount; ++SampleIndex)
+		    {
+		      int16 SampleValue = ((RunningSampleIndex++ / HalfSquareWavePeriod) % 2) ? ToneVolume : -ToneVolume;
+		      *SampleOut++ = SampleValue;
+		      *SampleOut++ = SampleValue;
+		    }
+		  
+		  DWORD Region2SampleCount = Region2Size/BytesPerSample;
+		  SampleOut = (int16 *)Region2;
+		  for(DWORD SampleIndex = 0; SampleIndex < Region2SampleCount; ++SampleIndex)
+		    {
+		      int16 SampleValue = ((RunningSampleIndex++ / HalfSquareWavePeriod) % 2) ? ToneVolume : -ToneVolume;
+		      *SampleOut++ = SampleValue;
+		      *SampleOut++ = SampleValue;
+		    }
+		  
+		  GlobalSecondaryBuffer->Unlock(Region1, Region1Size, Region2, Region2Size);
+		}
 
 	      // We get a handle to the window that allows us to issue draw calls.
 	      HDC DeviceContext = GetDC(WindowHandle);
